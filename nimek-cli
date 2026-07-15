@@ -17,10 +17,30 @@ die() { printf '\033[1;31m%s\033[0m\n' "$*" >&2; exit 1; }
 
 _get() { curl -s -H "User-Agent: $_UA" -H "Referer: $_REF" "$@"; }
 
-check_deps() {
-    for cmd in curl grep sed fzf mpv; do
-        command -v "$cmd" >/dev/null 2>&1 || command -v "${cmd}.exe" >/dev/null 2>&1 || die "Dependensi tidak ditemukan: $cmd"
+_MPV=""
+
+find_mpv() {
+    for p in \
+        "mpv" "mpv.exe" \
+        "/c/Program Files/mpv/mpv.exe" \
+        "/c/Program Files/MPV Player/mpv.exe" \
+        "/c/Program Files (x86)/mpv/mpv.exe"; do
+        command -v "$p" >/dev/null 2>&1 && { _MPV="$p"; return; }
+        [ -f "$p" ] && { _MPV="$p"; return; }
     done
+    die "mpv tidak ditemukan. Install: scoop install mpv"
+}
+
+check_deps() {
+    printf '\033[1;34mMemeriksa dependensi...\033[0m\n'
+    for cmd in curl grep sed fzf; do
+        printf '  %-10s' "$cmd"
+        command -v "$cmd" >/dev/null 2>&1 \
+            && printf '\033[1;32mOK\033[0m\n' \
+            || { printf '\033[1;31mTIDAK ADA\033[0m\n'; die "Dependensi tidak ditemukan: $cmd"; }
+    done
+    printf '  %-10s' "mpv"
+    find_mpv && printf '\033[1;32mOK\033[0m\n' || true
 }
 
 history_save() {
@@ -140,7 +160,7 @@ play() {
     if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
         am start --user 0 -a android.intent.action.VIEW -d "$url" -n is.xyz.mpv/.MPVActivity
     else
-        mpv.exe --referrer="$_REF" "$url" 2>/dev/null || mpv --referrer="$_REF" "$url"
+        "$_MPV" --referrer="$_REF" "$url"
     fi
     local ep_label
     ep_label="$(printf '%s' "$ep_slug" | sed 's/-subtitle-indonesia$//' | grep -o '[0-9]*$')"
