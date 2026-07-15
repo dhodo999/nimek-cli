@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+_BASE="https://x6.sokuja.uk"
+_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+_REF="https://x6.sokuja.uk/"
+_VERSION="1.0.0"
+
+_quality=""
+_ep_range=""
+_continue=0
+_hist_dir="${XDG_STATE_HOME:-$HOME/.local/state}/nimek-cli"
+_histfile="$_hist_dir/history"
+
+die() { printf '\033[1;31m%s\033[0m\n' "$*" >&2; exit 1; }
+
+_get() { curl -s -H "User-Agent: $_UA" -H "Referer: $_REF" "$@"; }
+
+check_deps() {
+    for cmd in curl grep sed fzf mpv; do
+        command -v "$cmd" >/dev/null 2>&1 || command -v "${cmd}.exe" >/dev/null 2>&1 || die "Dependensi tidak ditemukan: $cmd"
+    done
+}
+
+history_save() {
+    mkdir -p "$_hist_dir"
+    local tmp="$_histfile.tmp"
+    grep -v "^$1	" "$_histfile" 2>/dev/null > "$tmp" || true
+    printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3 - $4" "$5" >> "$tmp"
+    mv "$tmp" "$_histfile"
+}
+
+history_pick() {
+    [ -f "$_histfile" ] || die "Belum ada riwayat."
+    [ -s "$_histfile" ] || die "Riwayat kosong."
+    cat "$_histfile" \
+        | fzf --reverse --cycle --prompt="Lanjut anime: " \
+              --with-nth=3 --delimiter=$'\t' \
+        | cut -f1,2,4
+}
+
+search_anime() {
+    local q
+    q="$(printf '%s' "$1" | sed 's/ /+/g')"
+    _get "${_BASE}/api/search/?q=${q}&limit=20" \
+        | grep -o '"slug":"[^"]*","title":"[^"]*"' \
+        | sed 's/"slug":"\([^"]*\)","title":"\([^"]*\)"/\1\t\2/'
+}
+
+fetch_episodes() {
+    local html eps
+    html="$(_get "${_BASE}/anime/$1/" | sed 's/\\"/"/g')"
+    eps="$(printf '%s' "$html" \
+        | grep -o '"slug":"[^"]*-episode-[^"]*","title":"[^"]*","episodeNumber":[0-9]*' \
+        | sed 's/"slug":"\([^"]*\)","title":"[^"]*","episodeNumber":\([0-9]*\)/\1\tEpisode \2/' \
+        | sort -t' ' -k2 -V)"
+    if [ -z "$eps" ]; then
+        printf '%s\tFilm\n' "$1"
+    else
+        printf '%s\n' "$eps"
+    fi
+}
+
+fetch_video_urls() {
+    local ep_id
+    ep_id="$(_get "${_BASE}/$1/" \
+        | sed 's/\\"/"/g' \
+        | grep -o '"episodeId":[0-9]*' \
+        | head -1 \
+        | grep -o '[0-9]*')"
+    [ -z "$ep_id" ] && return 1
+    _get "${_BASE}/api/video-mirrors/?e=${ep_id}" \
+        | grep -o '"quality":"[^"]*","[^}]*"embedUrl":"[^"]*"\|"embedUrl":"[^"]*","[^}]*"quality":"[^"]*"' \
+        | while IFS= read -r chunk; do
+            quality="$(printf '%s' "$chunk" | grep -o '"quality":"[^"]*"' | grep -o '[^"]*p')"
+            url="$(printf '%s' "$chunk" | grep -o '"embedUrl":"[^"]*"' | sed 's/"embedUrl":"//;s/"$//')"
+            printf '%s\t%s\n' "$quality" "$url"
+          done
+}
+
+pick_anime() {
+    local results
+    results="$(search_anime "$*")"
+    [ -z "$results" ] && die "Tidak ada hasil untuk: $*"
+    printf '%s\n' "$results" \
+        | fzf --reverse --cycle --prompt="Pilih anime: " --with-nth=2 --delimiter=$'\t' \
+        | cut -f1
+}
+
+pick_episode() {
+    local slug="$1" current="${2:-}"
+    local episodes
+    episodes="$(fetch_episodes "$slug")"
+    [ -z "$episodes" ] && die "Tidak ada episode ditemukan."
+    local header
+    header="$(printf '%s' "$slug" | sed 's/-subtitle-indonesia//;s/-/ /g;s/\b\(.\)/\u\1/g')"
+    [ -n "$current" ] && header="$header  |  sekarang: $(printf '%s' "$current" | grep -o 'episode-[^-]*' | sed 's/-/ /')"
+    printf '%s\n' "$episodes" \
+        | fzf --reverse --cycle --prompt="Pilih episode: " \
+              --header="$header" \
+              --with-nth=2 --delimiter=$'\t' --tac \
+        | cut -f1
+}
+
+resolve_episode_range() {
+    local all_eps="$1" range="$2"
+    local start end
+    case "$range" in
+        *-*) start="${range%-*}"; end="${range#*-}" ;;
+        *)   start="$range";      end="$range" ;;
+    esac
+    printf '%s\n' "$all_eps" \
+        | awk -F'\t' -v s="$start" -v e="$end" '
+            match($2, /[0-9]+$/) {
+                n = substr($2, RSTART, RLENGTH)+0
+                if (n >= s+0 && n <= e+0) print $1
+            }'
+}
+
+pick_quality() {
+    local urls
+    urls="$(fetch_video_urls "$1")"
+    [ -z "$urls" ] && die "Tidak ada stream ditemukan."
+    if [ -n "$_quality" ]; then
+        local url
+        url="$(printf '%s\n' "$urls" | awk -F'\t' -v q="$_quality" '$1==q{print $2}' | head -1)"
+        [ -z "$url" ] && printf '\033[1;33mKualitas %s tidak ditemukan, memilih terbaik.\033[0m\n' "$_quality" >&2 \
+            && url="$(printf '%s\n' "$urls" | tail -1 | cut -f2)"
+        printf '%s' "$url"
+        return
+    fi
+    printf '%s\n' "$urls" \
+        | fzf --reverse --cycle --prompt="Pilih kualitas: " --with-nth=1 --delimiter=$'\t' \
+        | cut -f2
+}
+
+play() {
+    local url="$1" anime_slug="$2" ep_slug="$3" anime_title="$4"
+    if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
+        am start --user 0 -a android.intent.action.VIEW -d "$url" -n is.xyz.mpv/.MPVActivity
+    else
+        mpv.exe --referrer="$_REF" "$url" 2>/dev/null || mpv --referrer="$_REF" "$url"
+    fi
+    local ep_label
+    ep_label="$(printf '%s' "$ep_slug" | sed 's/-subtitle-indonesia$//' | grep -o '[0-9]*$')"
+    [ -n "$ep_label" ] && ep_label="Episode $ep_label" || ep_label="Film"
+    history_save "$anime_slug" "$ep_slug" "$anime_title" "$ep_label" "${_quality:-}"
+}
+
+help_info() {
+    printf "Penggunaan: nimek-cli [opsi] [judul anime]
+
+Opsi:
+  -c, --continue           Lanjut dari riwayat
+  -e, --episode <n|n-m>   Tonton episode tertentu atau rentang (mis. 3 atau 1-5)
+  -q, --quality <kualitas> Pilih kualitas langsung (mis. 1080p, 720p, 480p)
+  -V, --version            Tampilkan versi
+  -h, --help               Tampilkan bantuan ini
+
+Contoh:
+  nimek-cli                          Mode pencarian interaktif
+  nimek-cli -c                       Lanjut dari riwayat
+  nimek-cli \"one piece\"              Langsung cari anime
+  nimek-cli -e 5 \"one piece\"         Tonton episode 5
+  nimek-cli -e 1-3 -q 1080p \"naruto\" Tonton episode 1-3 kualitas 1080p
+"
+    exit 0
+}
+
+main() {
+    local query=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help)     help_info ;;
+            -V|--version)  printf '%s\n' "$_VERSION"; exit 0 ;;
+            -c|--continue) _continue=1 ;;
+            -q|--quality)  _quality="${2:-}"; shift ;;
+            -e|--episode)  _ep_range="${2:-}"; shift ;;
+            *) query="$(printf '%s %s' "$query" "$1" | sed 's/^ //')" ;;
+        esac
+        shift
+    done
+
+    check_deps
+
+    if [ "$_continue" = 1 ]; then
+        local hist_pick anime_slug episode_slug saved_quality
+        hist_pick="$(history_pick)"
+        [ -z "$hist_pick" ] && exit 0
+        anime_slug="$(printf '%s' "$hist_pick" | cut -f1)"
+        episode_slug="$(printf '%s' "$hist_pick" | cut -f2)"
+        saved_quality="$(printf '%s' "$hist_pick" | cut -f3)"
+        [ -z "$_quality" ] && [ -n "$saved_quality" ] && _quality="$saved_quality"
+        local video_url
+        video_url="$(pick_quality "$episode_slug")"
+        [ -z "$video_url" ] && exit 0
+        play "$video_url" "$anime_slug" "$episode_slug" \
+            "$(printf '%s' "$anime_slug" | sed 's/-subtitle-indonesia//;s/-/ /g')"
+        return
+    fi
+
+    if [ -z "$query" ]; then
+        while [ -z "$query" ]; do
+            read -rp $'\033[1;36mCari anime: \033[0m' query
+        done
+    fi
+
+    local anime_slug
+    anime_slug="$(pick_anime "$query")"
+    [ -z "$anime_slug" ] && exit 0
+
+    local all_eps
+    all_eps="$(fetch_episodes "$anime_slug")"
+
+    local anime_title
+    anime_title="$(printf '%s' "$anime_slug" | sed 's/-subtitle-indonesia//;s/-/ /g')"
+
+    if [ -n "$_ep_range" ]; then
+        local slugs
+        slugs="$(resolve_episode_range "$all_eps" "$_ep_range")"
+        [ -z "$slugs" ] && die "Episode '$_ep_range' tidak ditemukan."
+        while IFS= read -r ep_slug; do
+            local video_url
+            video_url="$(pick_quality "$ep_slug")"
+            [ -n "$video_url" ] && play "$video_url" "$anime_slug" "$ep_slug" "$anime_title"
+        done <<< "$slugs"
+        return
+    fi
+
+    local episode_slug video_url
+    episode_slug="$(pick_episode "$anime_slug")"
+    [ -z "$episode_slug" ] && exit 0
+
+    video_url="$(pick_quality "$episode_slug")"
+    [ -z "$video_url" ] && exit 0
+
+    while true; do
+        play "$video_url" "$anime_slug" "$episode_slug" "$anime_title"
+
+        local next_slug
+        next_slug="$(_get "${_BASE}/${episode_slug}/" \
+            | grep -o 'href="/[^"]*-episode-[^"]*"' \
+            | sed 's|href="/\([^"]*\)"|\1|; s|/$||' \
+            | grep "^$(printf '%s' "$anime_slug" | sed 's/-subtitle-indonesia//')" \
+            | grep -v "^${episode_slug}$" \
+            | tail -1)"
+
+        [ -z "$next_slug" ] && { printf "\033[1;33mSelesai!\033[0m\n"; break; }
+
+        local ep_label next_ep
+        ep_label="$(printf '%s\n' "$all_eps" | awk -F'\t' -v s="$episode_slug" '$1==s{print $2}')"
+        next_ep="$(printf '%s' "$next_slug" | grep -o '[0-9]*$')"
+
+        episode_slug="$(printf '%s\n' "$all_eps" \
+            | fzf --reverse --cycle \
+                  --prompt="Pilih episode: " \
+                  --header="$(printf '\033[1;36m%s\033[0m  |  sekarang: %s' "$anime_title" "$ep_label")" \
+                  --with-nth=2 --delimiter=$'\t' --tac \
+                  --query="$next_ep" \
+            | cut -f1)"
+        [ -z "$episode_slug" ] && break
+
+        video_url="$(pick_quality "$episode_slug")"
+        [ -z "$video_url" ] && break
+    done
+}
+
+main "$@"
