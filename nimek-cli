@@ -162,7 +162,14 @@ pick_quality() {
 play() {
     local url="$1" anime_slug="$2" ep_slug="$3" anime_title="$4"
     if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
-        am start --user 0 -a android.intent.action.VIEW -d "$url" -n is.xyz.mpv/.MPVActivity
+        local dir="/storage/emulated/0/mpv" file
+        file="$dir/mpv.config.mp4"
+        if [ -w "/storage/emulated/0" ]; then
+            [ -d "$dir" ] || mkdir -p "$dir"
+            printf "referrer=%s\n" "$_REF" > "$file"
+        fi
+        am start --user 0 -a android.intent.action.VIEW -d "$url" \
+            -n is.xyz.mpv/.MPVActivity -e "title" "$anime_title" >/dev/null 2>&1
     else
         "$_MPV" --referrer="$_REF" "$url"
     fi
