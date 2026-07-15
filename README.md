@@ -2,25 +2,34 @@
 
 CLI untuk nonton anime subtitle Indonesia dari terminal. Source: [sokuja.uk](https://x6.sokuja.uk)
 
-## Dependensi
-
-`curl` `fzf` `mpv`
-
-**Windows (Git Bash):** `scoop install fzf mpv`  
-**Termux:** `pkg install curl fzf` + install MPV dari Play Store/F-Droid
-
 ## Install
 
-**Windows (Git Bash):**
+### Windows (Git Bash)
+
+1. Install [Git for Windows](https://git-scm.com/download/win) dan [Scoop](https://scoop.sh)
+2. Install dependensi:
 ```bash
-cp nimek-cli /c/Users/$USERNAME/scoop/shims/nimek-cli
+scoop install fzf mpv
+```
+3. Install nimek-cli:
+```bash
+curl -sL https://raw.githubusercontent.com/dhodo999/nimek-cli/main/nimek-cli -o /c/Users/$USERNAME/scoop/shims/nimek-cli
 ```
 
-**Termux / Linux:**
+### Termux (Android)
+
+1. Install dependensi:
 ```bash
-cp nimek-cli $PREFIX/bin/nimek-cli
+pkg install curl fzf
+```
+2. Install MPV dari [Play Store](https://play.google.com/store/apps/details?id=is.xyz.mpv) atau F-Droid
+3. Install nimek-cli:
+```bash
+curl -sL https://raw.githubusercontent.com/dhodo999/nimek-cli/main/nimek-cli -o $PREFIX/bin/nimek-cli
 chmod +x $PREFIX/bin/nimek-cli
 ```
+
+> Ganti `$USERNAME` dengan username Windows kamu.
 
 ## Penggunaan
 
