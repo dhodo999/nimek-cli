@@ -40,7 +40,11 @@ check_deps() {
             || { printf '\033[1;31mTIDAK ADA\033[0m\n'; die "Dependensi tidak ditemukan: $cmd"; }
     done
     printf '  %-10s' "mpv"
-    find_mpv && printf '\033[1;32mOK\033[0m\n' || true
+    if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
+        printf '\033[1;33mAPK (tidak dicek)\033[0m\n'
+    else
+        find_mpv && printf '\033[1;32mOK\033[0m\n' || true
+    fi
 }
 
 history_save() {
