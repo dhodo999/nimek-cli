@@ -2,11 +2,16 @@
 
 set -euo pipefail
 
-_BASE="https://x6.sokuja.uk"
+_VERSION="1.1.0"
 _UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-_REF="https://x6.sokuja.uk/"
-_VERSION="1.0.0"
 
+# Provider configuration
+_PROVIDER="sokuja"
+_SOKUJA_BASE="https://x6.sokuja.uk"
+_SOKUJA_REF="https://x6.sokuja.uk/"
+_NITROT_BASE="https://nitrot.vercel.app"
+
+# Global variables
 _quality=""
 _ep_range=""
 _continue=0
@@ -15,7 +20,50 @@ _histfile="$_hist_dir/history"
 
 die() { printf '\033[1;31m%s\033[0m\n' "$*" >&2; exit 1; }
 
-_get() { curl -s -H "User-Agent: $_UA" -H "Referer: $_REF" "$@"; }
+_get() { curl -s -H "User-Agent: $_UA" "$@"; }
+
+_get_sokuja() { curl -s -H "User-Agent: $_UA" -H "Referer: $_SOKUJA_REF" "$@"; }
+
+_get_nitrot() { curl -s -H "User-Agent: $_UA" "$@"; }
+
+# Loading animation function
+show_loading() {
+    local msg="$1"
+    local width=30
+    local pos=0
+    local direction=1
+    
+    while true; do
+        # Build the progress bar
+        local bar=""
+        local i
+        for ((i=0; i<width; i++)); do
+            if [ $i -eq $pos ]; then
+                bar="${bar}█"
+            else
+                bar="${bar}░"
+            fi
+        done
+        
+        # Print the loading bar
+        printf '\r\033[1;36m%s\033[0m [%s]' "$msg" "$bar" >&2
+        
+        # Update position
+        pos=$((pos + direction))
+        
+        # Reverse direction at boundaries
+        if [ $pos -ge $((width - 1)) ] || [ $pos -le 0 ]; then
+            direction=$((direction * -1))
+        fi
+        
+        sleep 0.05
+    done
+}
+
+stop_loading() {
+    [ -n "${1:-}" ] && kill "$1" 2>/dev/null
+    printf '\r\033[K' >&2  # Clear the line
+}
 
 _MPV=""
 
@@ -61,20 +109,24 @@ history_pick() {
     cat "$_histfile" \
         | fzf --reverse --cycle --prompt="Lanjut anime: " \
               --with-nth=3 --delimiter=$'\t' \
-        | cut -f1,2,4
+        | cut -f1,2,4,5
 }
 
-search_anime() {
+# ============================================================
+# SOKUJA PROVIDER FUNCTIONS
+# ============================================================
+
+sokuja_search_anime() {
     local q
     q="$(printf '%s' "$1" | sed 's/ /+/g')"
-    _get "${_BASE}/api/search/?q=${q}&limit=20" \
+    _get_sokuja "${_SOKUJA_BASE}/api/search/?q=${q}&limit=20" \
         | grep -o '"slug":"[^"]*","title":"[^"]*"' \
         | sed 's/"slug":"\([^"]*\)","title":"\([^"]*\)"/\1\t\2/'
 }
 
-fetch_episodes() {
+sokuja_fetch_episodes() {
     local html eps
-    html="$(_get "${_BASE}/anime/$1/" | sed 's/\\"/"/g')"
+    html="$(_get_sokuja "${_SOKUJA_BASE}/anime/$1/" | sed 's/\\"/"/g')"
     eps="$(printf '%s' "$html" \
         | grep -o '"slug":"[^"]*-episode-[^"]*","title":"[^"]*","episodeNumber":[0-9]*' \
         | sed 's/"slug":"\([^"]*\)","title":"[^"]*","episodeNumber":\([0-9]*\)/\1\tEpisode \2/' \
@@ -86,21 +138,93 @@ fetch_episodes() {
     fi
 }
 
-fetch_video_urls() {
+sokuja_fetch_video_urls() {
     local ep_id
-    ep_id="$(_get "${_BASE}/$1/" \
+    ep_id="$(_get_sokuja "${_SOKUJA_BASE}/$1/" \
         | sed 's/\\"/"/g' \
         | grep -o '"episodeId":[0-9]*' \
         | head -1 \
         | grep -o '[0-9]*')"
     [ -z "$ep_id" ] && return 1
-    _get "${_BASE}/api/video-mirrors/?e=${ep_id}" \
+    _get_sokuja "${_SOKUJA_BASE}/api/video-mirrors/?e=${ep_id}" \
         | grep -o '"quality":"[^"]*","[^}]*"embedUrl":"[^"]*"\|"embedUrl":"[^"]*","[^}]*"quality":"[^"]*"' \
         | while IFS= read -r chunk; do
             quality="$(printf '%s' "$chunk" | grep -o '"quality":"[^"]*"' | grep -o '[^"]*p')"
             url="$(printf '%s' "$chunk" | grep -o '"embedUrl":"[^"]*"' | sed 's/"embedUrl":"//;s/"$//')"
             printf '%s\t%s\n' "$quality" "$url"
           done
+}
+
+# ============================================================
+# NITROT PROVIDER FUNCTIONS
+# ============================================================
+
+nitrot_search_anime() {
+    local q
+    q="$(printf '%s' "$1" | sed 's/ /+/g')"
+    _get_nitrot "${_NITROT_BASE}/api/search?q=${q}" \
+        | grep -o '"Title":"[^"]*","URL":"[^"]*"' \
+        | sed 's/"Title":"\([^"]*\)","URL":"[^"]*\/anime\/\([^"\/]*\)\/"/\2\t\1/'
+}
+
+nitrot_fetch_episodes() {
+    local json
+    json="$(_get_nitrot "${_NITROT_BASE}/api/anime?slug=$1")"
+    printf '%s' "$json" \
+        | grep -o '"Number":[0-9]*,"URL":"[^"]*","Label":"[^"]*"' \
+        | sed 's/"Number":\([0-9]*\),"URL":"[^"]*\/\([^"\/]*\)\/","Label":"\([^"]*\)"/\2\t\3/'
+}
+
+nitrot_fetch_video_urls() {
+    local anime_slug ep_slug json anime_url ep_url anime_url_enc ep_url_enc
+    
+    # For nitrot, the episode slug format is "nonton-{anime-name}-episode-{number}"
+    # Extract the anime name by removing "nonton-" prefix and everything after "-episode-"
+    anime_slug="$(printf '%s' "$1" | sed 's/^nonton-//;s/-episode-.*$//')"
+    ep_slug="$1"
+    
+    # Construct the URLs based on the slug patterns
+    anime_url="https://kuronime.sbs/anime/${anime_slug}/"
+    ep_url="https://kuronime.sbs/${ep_slug}/"
+    
+    # URL encode the parameters
+    anime_url_enc="$(printf '%s' "$anime_url" | sed 's/:/%3A/g;s/\//%2F/g')"
+    ep_url_enc="$(printf '%s' "$ep_url" | sed 's/:/%3A/g;s/\//%2F/g')"
+    
+    json="$(_get_nitrot "${_NITROT_BASE}/api/watch?anime=${anime_url_enc}&ep=${ep_url_enc}")"
+    
+    printf '%s' "$json" \
+        | grep -o '"Label":"[^"]*","URL":"[^"]*"' \
+        | sed 's|"Label":"\([^"]*\)","URL":"\([^"]*\)"|\1\t'"${_NITROT_BASE}"'\2|' \
+        | sed 's/\\u0026/\&/g'
+}
+
+# ============================================================
+# PROVIDER WRAPPER FUNCTIONS
+# ============================================================
+
+search_anime() {
+    case "$_PROVIDER" in
+        sokuja) sokuja_search_anime "$@" ;;
+        nitrot) nitrot_search_anime "$@" ;;
+        *) die "Provider tidak dikenal: $_PROVIDER" ;;
+    esac
+}
+
+fetch_episodes() {
+    case "$_PROVIDER" in
+        sokuja) sokuja_fetch_episodes "$@" ;;
+        nitrot) nitrot_fetch_episodes "$@" ;;
+        *) die "Provider tidak dikenal: $_PROVIDER" ;;
+    esac
+}
+
+fetch_video_urls() {
+    case "$_PROVIDER" in
+        sokuja) sokuja_fetch_video_urls "$@" ;;
+        nitrot) nitrot_fetch_video_urls "$@" ;;
+        *) die "Provider tidak dikenal: $_PROVIDER" ;;
+    esac
 }
 
 pick_anime() {
@@ -147,10 +271,36 @@ pick_quality() {
     urls="$(fetch_video_urls "$1")"
     [ -z "$urls" ] && die "Tidak ada stream ditemukan."
     if [ -n "$_quality" ]; then
-        local url
+        local url fallback_qualities available_qualities
+        # Try exact match first
         url="$(printf '%s\n' "$urls" | awk -F'\t' -v q="$_quality" '$1==q{print $2}' | head -1)"
-        [ -z "$url" ] && printf '\033[1;33mKualitas %s tidak ditemukan, memilih terbaik.\033[0m\n' "$_quality" >&2 \
-            && url="$(printf '%s\n' "$urls" | tail -1 | cut -f2)"
+        
+        if [ -z "$url" ]; then
+            # Define fallback order based on requested quality
+            case "$_quality" in
+                1080p) fallback_qualities="720p 480p 360p" ;;
+                720p)  fallback_qualities="480p 360p 1080p" ;;
+                480p)  fallback_qualities="360p 720p 1080p" ;;
+                360p)  fallback_qualities="480p 720p 1080p" ;;
+                *)     fallback_qualities="1080p 720p 480p 360p" ;;
+            esac
+            
+            # Try each fallback quality in order
+            for quality in $fallback_qualities; do
+                url="$(printf '%s\n' "$urls" | awk -F'\t' -v q="$quality" '$1==q{print $2}' | head -1)"
+                if [ -n "$url" ]; then
+                    printf '\033[1;33mKualitas %s tidak tersedia, menggunakan %s.\033[0m\n' "$_quality" "$quality" >&2
+                    break
+                fi
+            done
+            
+            # If still no match, use the best available
+            if [ -z "$url" ]; then
+                available_qualities="$(printf '%s\n' "$urls" | cut -f1 | tr '\n' ', ' | sed 's/,$//')"
+                printf '\033[1;33mKualitas %s tidak tersedia, menggunakan kualitas terbaik yang ada (%s).\033[0m\n' "$_quality" "$available_qualities" >&2
+                url="$(printf '%s\n' "$urls" | tail -1 | cut -f2)"
+            fi
+        fi
         printf '%s' "$url"
         return
     fi
@@ -161,40 +311,69 @@ pick_quality() {
 
 play() {
     local url="$1" anime_slug="$2" ep_slug="$3" anime_title="$4"
+    local referer loading_pid
+    
+    # Start loading animation
+    show_loading "Memuat video" &
+    loading_pid=$!
+    
+    # Set referer based on provider
+    case "$_PROVIDER" in
+        sokuja) referer="$_SOKUJA_REF" ;;
+        nitrot) referer="$_NITROT_BASE/" ;;
+        *) referer="" ;;
+    esac
+    
     if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
         local dir="/storage/emulated/0/mpv" file
         file="$dir/mpv.config.mp4"
         if [ -w "/storage/emulated/0" ]; then
             [ -d "$dir" ] || mkdir -p "$dir"
-            printf "referrer=%s\n" "$_REF" > "$file"
+            [ -n "$referer" ] && printf "referrer=%s\n" "$referer" > "$file"
         fi
+        stop_loading "$loading_pid"
         am start --user 0 -a android.intent.action.VIEW -d "$url" \
             -n is.xyz.mpv/.MPVActivity -e "title" "$anime_title" >/dev/null 2>&1
     else
-        "$_MPV" --referrer="$_REF" "$url"
+        if [ -n "$referer" ]; then
+            "$_MPV" --referrer="$referer" "$url" &
+        else
+            "$_MPV" "$url" &
+        fi
+        # Give mpv a moment to start, then stop loading
+        sleep 1
+        stop_loading "$loading_pid"
+        wait
     fi
     local ep_label
     ep_label="$(printf '%s' "$ep_slug" | sed 's/-subtitle-indonesia$//' | grep -o '[0-9]*$')"
     [ -n "$ep_label" ] && ep_label="Episode $ep_label" || ep_label="Film"
-    history_save "$anime_slug" "$ep_slug" "$anime_title" "$ep_label" "${_quality:-}"
+    history_save "$anime_slug" "$ep_slug" "$anime_title" "$ep_label" "${_quality:-}:${_PROVIDER}"
 }
 
 help_info() {
     printf "Penggunaan: nimek-cli [opsi] [judul anime]
 
 Opsi:
-  -c, --continue           Lanjut dari riwayat
-  -e, --episode <n|n-m>   Tonton episode tertentu atau rentang (mis. 3 atau 1-5)
-  -q, --quality <kualitas> Pilih kualitas langsung (mis. 1080p, 720p, 480p)
-  -V, --version            Tampilkan versi
-  -h, --help               Tampilkan bantuan ini
+  -c, --continue              Lanjut dari riwayat
+  -e, --episode <n|n-m>       Tonton episode tertentu atau rentang (mis. 3 atau 1-5)
+  -q, --quality <kualitas>    Pilih kualitas langsung (mis. 1080p, 720p, 480p)
+  -p, --provider <provider>   Pilih provider (sokuja atau nitrot, default: sokuja)
+  -V, --version               Tampilkan versi
+  -h, --help                  Tampilkan bantuan ini
+
+Provider:
+  sokuja    - https://x6.sokuja.uk (default)
+  nitrot    - https://nitrot.vercel.app
 
 Contoh:
-  nimek-cli                          Mode pencarian interaktif
-  nimek-cli -c                       Lanjut dari riwayat
-  nimek-cli \"one piece\"              Langsung cari anime
-  nimek-cli -e 5 \"one piece\"         Tonton episode 5
-  nimek-cli -e 1-3 -q 1080p \"naruto\" Tonton episode 1-3 kualitas 1080p
+  nimek-cli                             Mode pencarian interaktif
+  nimek-cli -c                          Lanjut dari riwayat
+  nimek-cli \"one piece\"                 Langsung cari anime
+  nimek-cli -e 5 \"one piece\"            Tonton episode 5
+  nimek-cli -e 1-3 -q 1080p \"naruto\"    Tonton episode 1-3 kualitas 1080p
+  nimek-cli -p nitrot \"naruto\"          Cari anime menggunakan provider nitrot
+  nimek-cli -p nitrot -q 720p \"one piece\" Gunakan nitrot dengan kualitas 720p
 "
     exit 0
 }
@@ -209,21 +388,43 @@ main() {
             -c|--continue) _continue=1 ;;
             -q|--quality)  _quality="${2:-}"; shift ;;
             -e|--episode)  _ep_range="${2:-}"; shift ;;
+            -p|--provider) _PROVIDER="${2:-}"; shift ;;
             *) query="$(printf '%s %s' "$query" "$1" | sed 's/^ //')" ;;
         esac
         shift
     done
 
+    # Validate provider
+    case "$_PROVIDER" in
+        sokuja|nitrot) ;;
+        *) die "Provider tidak valid: $_PROVIDER (pilih: sokuja atau nitrot)" ;;
+    esac
+
     check_deps
 
     if [ "$_continue" = 1 ]; then
-        local hist_pick anime_slug episode_slug saved_quality
+        local hist_pick anime_slug episode_slug saved_data saved_quality saved_provider
         hist_pick="$(history_pick)"
         [ -z "$hist_pick" ] && exit 0
         anime_slug="$(printf '%s' "$hist_pick" | cut -f1)"
         episode_slug="$(printf '%s' "$hist_pick" | cut -f2)"
-        saved_quality="$(printf '%s' "$hist_pick" | cut -f3)"
+        saved_data="$(printf '%s' "$hist_pick" | cut -f4)"
+        
+        # Parse quality:provider format
+        if [[ "$saved_data" == *:* ]]; then
+            saved_quality="${saved_data%:*}"
+            saved_provider="${saved_data#*:}"
+        else
+            saved_quality="$saved_data"
+            saved_provider="sokuja"
+        fi
+        
+        # Use saved quality and provider if not specified
         [ -z "$_quality" ] && [ -n "$saved_quality" ] && _quality="$saved_quality"
+        [ "$_PROVIDER" = "sokuja" ] && [ -n "$saved_provider" ] && _PROVIDER="$saved_provider"
+        
+        printf '\033[1;36mMenggunakan provider: %s\033[0m\n' "$_PROVIDER"
+        
         local video_url
         video_url="$(pick_quality "$episode_slug")"
         [ -z "$video_url" ] && exit 0
@@ -237,6 +438,8 @@ main() {
             read -rp $'\033[1;36mCari anime: \033[0m' query
         done
     fi
+
+    printf '\033[1;36mMenggunakan provider: %s\033[0m\n' "$_PROVIDER"
 
     local anime_slug
     anime_slug="$(pick_anime "$query")"
@@ -270,19 +473,27 @@ main() {
     while true; do
         play "$video_url" "$anime_slug" "$episode_slug" "$anime_title"
 
-        local next_slug
-        next_slug="$(_get "${_BASE}/${episode_slug}/" \
-            | grep -o 'href="/[^"]*-episode-[^"]*"' \
-            | sed 's|href="/\([^"]*\)"|\1|; s|/$||' \
-            | grep "^$(printf '%s' "$anime_slug" | sed 's/-subtitle-indonesia//')" \
-            | grep -v "^${episode_slug}$" \
-            | tail -1)"
+        # Find next episode from the episode list
+        local current_ep_num next_ep
+        current_ep_num="$(printf '%s\n' "$all_eps" | awk -F'\t' -v s="$episode_slug" '$1==s{print $2}' | grep -o '[0-9]*$')"
+        
+        if [ -n "$current_ep_num" ]; then
+            next_ep=$((current_ep_num + 1))
+        else
+            next_ep=""
+        fi
 
-        [ -z "$next_slug" ] && { printf "\033[1;33mSelesai!\033[0m\n"; break; }
-
-        local ep_label next_ep
+        local ep_label
         ep_label="$(printf '%s\n' "$all_eps" | awk -F'\t' -v s="$episode_slug" '$1==s{print $2}')"
-        next_ep="$(printf '%s' "$next_slug" | grep -o '[0-9]*$')"
+        
+        # Check if there's a next episode in the list
+        local has_next
+        has_next="$(printf '%s\n' "$all_eps" | grep -c "Episode ${next_ep}$" || true)"
+        
+        if [ "$has_next" -eq 0 ]; then
+            printf "\033[1;33mSelesai!\033[0m\n"
+            break
+        fi
 
         episode_slug="$(printf '%s\n' "$all_eps" \
             | fzf --reverse --cycle \
