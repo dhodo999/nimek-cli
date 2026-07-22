@@ -67,6 +67,28 @@ Contoh:
 
 Disimpan di `~/.local/state/nimek-cli/history`.
 
+## Uninstall
+
+### Windows (Git Bash)
+
+```bash
+# Hapus script
+rm /c/Users/$USERNAME/.local/bin/nimek-cli
+
+# Hapus riwayat (opsional)
+rm -rf ~/.local/state/nimek-cli
+```
+
+### Termux (Android)
+
+```bash
+# Hapus script
+rm $PREFIX/bin/nimek-cli
+
+# Hapus riwayat (opsional)
+rm -rf ~/.local/state/nimek-cli
+```
+
 ## Lisensi
 
 [MIT](LICENSE)
